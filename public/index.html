@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Outbound port 25 check</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0e15;
+      --panel: #101725;
+      --border: #1f2a3d;
+      --text: #e7eefb;
+      --muted: #8b9ab3;
+      --green: #34d399;
+      --red: #fb7185;
+      --amber: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+      background: radial-gradient(900px 500px at 50% -10%, #17263f 0%, var(--bg) 65%);
+      color: var(--text);
+      font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { width: 100%; max-width: 780px; }
+    h1 { margin: 0 0 8px; font-size: 1.4rem; letter-spacing: .01em; }
+    .sub { margin: 0 0 24px; color: var(--muted); font-size: .94rem; max-width: 62ch; }
+    .status {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--panel);
+      padding: 30px 24px;
+      text-align: center;
+      font-size: clamp(1.45rem, 4.5vw, 2.1rem);
+      font-weight: 750;
+      letter-spacing: .045em;
+      text-transform: uppercase;
+      transition: color .2s, border-color .2s, box-shadow .2s;
+    }
+    .status.checking { color: var(--muted); }
+    .status.open { color: var(--green); border-color: rgba(52, 211, 153, .45); box-shadow: 0 0 70px -30px var(--green); }
+    .status.blocked { color: var(--red); border-color: rgba(251, 113, 133, .45); box-shadow: 0 0 70px -30px var(--red); }
+    .status.inconclusive { color: var(--amber); border-color: rgba(251, 191, 36, .45); }
+    .actions { display: flex; align-items: center; gap: 14px; margin: 16px 0 22px; flex-wrap: wrap; }
+    button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #162033;
+      color: var(--text);
+      font: inherit;
+      font-size: .9rem;
+      font-weight: 600;
+      padding: 9px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    button:hover:not(:disabled) { background: #1b2940; border-color: #2d3d59; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .meta { color: var(--muted); font-size: .86rem; }
+    .table-wrap { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    th {
+      background: #0e1522;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: .78rem;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    td.host { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .84rem; }
+    td.num { white-space: nowrap; color: var(--muted); }
+    td.detail { color: var(--muted); overflow-wrap: anywhere; }
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+    .badge.ok { background: rgba(52, 211, 153, .13); color: var(--green); }
+    .badge.fail { background: rgba(251, 113, 133, .13); color: var(--red); }
+    .foot { margin: 18px 0 0; color: var(--muted); font-size: .82rem; }
+    @media (max-width: 560px) {
+      th:nth-child(3), td:nth-child(3) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Outbound port 25 check</h1>
+    <p class="sub">
+      Opens a TCP connection from this container to public SMTP servers on port 25.
+      Port 443 to www.google.com is used as a control to confirm general outbound connectivity.
+    </p>
+    <div id="status" class="status checking" aria-live="polite">Checking port 25...</div>
+    <div class="actions">
+      <button id="run" type="button">Run check again</button>
+      <span id="meta" class="meta"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Target</th>
+            <th>Result</th>
+            <th>Latency</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="foot">
+      A blocked result usually means the hosting provider filters outbound SMTP (port 25).
+    </p>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const rowsEl = document.getElementById('rows');
+    const metaEl = document.getElementById('meta');
+    const runBtn = document.getElementById('run');
+    let busy = false;
+
+    const VERDICT_TEXT = {
+      open: 'Port 25 is open',
+      blocked: 'Port 25 is blocked',
+      inconclusive: 'Could not determine port 25 status',
+    };
+
+    function cell(text, className) {
+      const td = document.createElement('td');
+      if (className) td.className = className;
+      td.textContent = text;
+      return td;
+    }
+
+    function addRow(check, isControl) {
+      const tr = document.createElement('tr');
+      const result = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (check.open ? 'ok' : 'fail');
+      badge.textContent = check.open ? 'open' : 'closed';
+      result.append(badge);
+
+      tr.append(
+        cell(check.host + ':' + check.port + (isControl ? ' (control)' : ''), 'host'),
+        result,
+        cell(check.ms + ' ms', 'num'),
+        cell(check.detail, 'detail')
+      );
+      rowsEl.append(tr);
+    }
+
+    function render(data) {
+      statusEl.className = 'status ' + data.verdict;
+      statusEl.textContent = VERDICT_TEXT[data.verdict] || 'Unknown result';
+
+      for (const check of data.checks) addRow(check, false);
+      addRow(data.control, true);
+
+      metaEl.textContent =
+        'Checked ' + new Date(data.checkedAt).toLocaleTimeString() +
+        ' · ' + data.durationMs + ' ms · ' +
+        data.reachable + '/' + data.total + ' SMTP targets reachable';
+    }
+
+    async function run() {
+      if (busy) return;
+      busy = true;
+      runBtn.disabled = true;
+      statusEl.className = 'status checking';
+      statusEl.textContent = 'Checking port 25...';
+      rowsEl.replaceChildren();
+      metaEl.textContent = '';
+
+      try {
+        const res = await fetch('/api/check', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        render(await res.json());
+      } catch (err) {
+        statusEl.className = 'status inconclusive';
+        statusEl.textContent = 'Check failed';
+        metaEl.textContent = err.message;
+      } finally {
+        busy = false;
+        runBtn.disabled = false;
+      }
+    }
+
+    runBtn.addEventListener('click', run);
+    run();
+  </script>
+</body>
+</html>
